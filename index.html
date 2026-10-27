@@ -251,7 +251,10 @@ main.wide{max-width:1280px}
       <span class="kicker">이현고등학교</span>
       <h1>생활지도 체크리스트</h1>
     </div>
-    <span class="mode local" id="mode">이 기기에만 저장</span>
+    <div class="row" style="gap:8px">
+      <span class="mode local" id="mode">잠김</span>
+      <button class="btn sm" id="logoutBtn" hidden onclick="window.sbLogout()">로그아웃</button>
+    </div>
   </div>
 </header>
 
@@ -398,7 +401,7 @@ main.wide{max-width:1280px}
     <div class="panel lock">
       <div class="lock-ic"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
       <h2>교사 전용 화면</h2>
-      <p class="sub">적발 기록과 누적 현황은 선생님만 볼 수 있습니다. 비밀번호를 입력해 주세요.</p>
+      <p class="sub">적발 기록과 누적 현황은 선생님만 볼 수 있습니다. 비밀번호를 입력해 주세요. 한 번 입력하면 이 기기에서 12시간 동안 유지됩니다.</p>
       <div class="lock-row">
         <input id="pw" type="password" inputmode="numeric" autocomplete="off" placeholder="비밀번호" aria-label="비밀번호">
         <button class="btn primary" id="pwBtn">확인</button>
@@ -437,6 +440,75 @@ main.wide{max-width:1280px}
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script>
+/* ===== Supabase 연결 설정 =====
+ * SB_KEY 에 Supabase의 공개 키(Publishable key 또는 anon public key)를 붙여 넣으세요.
+ * 이 키는 공개돼도 괜찮은 키입니다. 데이터는 비밀번호를 확인하는 서버 함수로만 열립니다.
+ * secret key(service_role)는 절대 넣지 마세요. */
+const SB_URL = 'https://sxeeljwqxyayjuewzmtt.supabase.co';
+const SB_KEY = 'sb_publishable_0-hY70a60htATzLG1l-RUg_35eQ3e_q';
+(function(){
+  const K='ihyeon-sb-session';
+  let PW=null, ROLE=null, resolveReady; const ready=new Promise(r=>{ resolveReady=r; });
+  async function rpc(fn,args){
+    if(!/^[\x21-\x7e]+$/.test(SB_KEY)) throw Object.assign(new Error('nokey'),{code:'nokey'});
+    let r;
+    try{ r=await fetch(`${SB_URL}/rest/v1/rpc/${fn}`,{method:'POST',headers:{'apikey':SB_KEY,'Content-Type':'application/json'},body:JSON.stringify(args||{})}); }
+    catch(e){ throw Object.assign(new Error('net'),{code:'net'}); }
+    const j=await r.json().catch(()=>null);
+    if(!r.ok) throw Object.assign(new Error((j&&j.message)||'server'),{code:'server'});
+    if(j&&!Array.isArray(j)&&j.error){
+      if(j.error==='auth'&&ROLE){ window.sbLogout(true); }
+      throw Object.assign(new Error(j.error),{code:j.error});
+    }
+    return j;
+  }
+  window.sbLogin=async(pw,silent)=>{
+    const r=await rpc('app_login',{p_pw:pw});
+    PW=pw; ROLE=r.role; window.__sbRole=ROLE;
+    try{ localStorage.setItem(K,JSON.stringify({pw,exp:Date.now()+12*3600*1000})); }catch(e){}
+    resolveReady(); return ROLE;
+  };
+  window.sbLogout=(expired)=>{ try{ localStorage.removeItem(K); }catch(e){} location.reload(); };
+  window.sbAutoLogin=async()=>{
+    let s=null; try{ s=JSON.parse(localStorage.getItem(K)||'null'); }catch(e){}
+    if(!s||!s.pw||s.exp<Date.now()) return null;
+    try{ return await window.sbLogin(s.pw,true); }catch(e){ try{ localStorage.removeItem(K); }catch(_){} return null; }
+  };
+  const subs=new Set(); const timers={};
+  const wrapDocs=rows=>({docs:(rows||[]).map(x=>({id:x.id,data:()=>x.data})),get empty(){ return !(rows||[]).length; }});
+  async function run(s){
+    try{
+      if(s.kind==='col') s.cb(wrapDocs(await rpc('app_list',{p_pw:PW,p_col:s.col,p_lim:s.lim||1000,p_ord:s.ord||null})));
+      else { const d=await rpc('app_get',{p_pw:PW,p_col:s.col,p_id:s.id}); s.cb({exists:d!==null,id:s.id,data:()=>d}); }
+    }catch(e){ if(s.err&&e.code!=='net') s.err(e); }
+  }
+  function refresh(col){ clearTimeout(timers[col]); timers[col]=setTimeout(()=>subs.forEach(s=>{ if(s.col===col) run(s); }),250); }
+  setInterval(()=>{ if(PW&&document.visibilityState==='visible') subs.forEach(run); },20000);
+  document.addEventListener('visibilitychange',()=>{ if(PW&&document.visibilityState==='visible') subs.forEach(run); });
+  function query(col,lim,ord){ return {
+    limit:n=>query(col,n,ord),
+    orderBy:(f,dir)=>query(col,lim,dir==='desc'?'desc':'asc'),
+    get:async()=>wrapDocs(await rpc('app_list',{p_pw:PW,p_col:col,p_lim:lim||1000,p_ord:ord||null})),
+    onSnapshot:(cb,err)=>{ const s={kind:'col',col,lim,ord,cb,err}; subs.add(s); run(s); return ()=>subs.delete(s); }
+  }; }
+  function doc(path){
+    const i=path.indexOf('/'), col=path.slice(0,i), id=path.slice(i+1);
+    return { id, path,
+      get:async()=>{ const d=await rpc('app_get',{p_pw:PW,p_col:col,p_id:id}); return {exists:d!==null,id,data:()=>d}; },
+      set:async(data)=>{ await rpc('app_set',{p_pw:PW,p_col:col,p_id:id,p_data:data}); refresh(col); },
+      update:async(data)=>{ const cur=await rpc('app_get',{p_pw:PW,p_col:col,p_id:id}); await rpc('app_set',{p_pw:PW,p_col:col,p_id:id,p_data:{...(cur||{}),...data}}); refresh(col); },
+      delete:async()=>{ await rpc('app_del',{p_pw:PW,p_col:col,p_id:id}); refresh(col); },
+      acquire:async(o)=>rpc('app_acquire',{p_pw:PW,p_col:col,p_id:id,p_holder:String(o&&o.holder||''),p_ttl:(o&&o.ttlMs)||30000}),
+      onSnapshot:(cb,err)=>{ const s={kind:'doc',col,id,cb,err}; subs.add(s); run(s); return ()=>subs.delete(s); }
+    };
+  }
+  const db={collection:c=>query(c), doc};
+  const user={can:async()=>true, canEdit:async()=>ROLE==='admin', isOwner:async()=>ROLE==='admin', id:async()=>'', profiles:async()=>({})};
+  const downloads={save:async({filename,data})=>{ const a=document.createElement('a'); a.href=URL.createObjectURL(data); a.download=filename; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1500); }};
+  window.claude={use:async(name)=>{ if(name==='downloads') return downloads; await ready; if(name==='db') return db; if(name==='user') return user; return null; }};
+})();
+</script>
 <script>
 const DEFAULT_RULES = `@ 10월 30일(금)까지 계도 기간, 11월 1일부터 시행
 # 학교생활규정 제49조(용의복장) | 올해 새로 생긴 규정이 아니라 원래 있던 규정입니다
@@ -1248,14 +1320,17 @@ $('#aSave').onclick=async()=>{
 
 const PW_HASH='50f59dfe3dd170a0db7e3ba38d8c3a1fae29716e3dcf70c7541dbeb88b088499';
 let pendingTab='record', unlockedMem=false;
-function isUnlocked(){ return true; } // 교사 전용 앱이라 비밀번호 잠금을 쓰지 않음
+function isUnlocked(){ return !!window.__sbRole; }
 async function tryUnlock(){
   const v=$('#pw').value.trim(); if(!v) return;
-  let h='';
-  try{ const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('ihyeon-guidance|'+v)); h=Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join(''); }catch(e){}
-  if(h!==PW_HASH){ $('#pwErr').hidden=false; $('#pw').select(); return; }
-  unlockedMem=true; try{ localStorage.setItem(LK+'-unlock2',today()); }catch(e){}
-  $('#pw').value=''; $('#pwErr').hidden=true; showTab(pendingTab);
+  const b=$('#pwBtn'); b.disabled=true;
+  try{
+    await window.sbLogin(v);
+    $('#pw').value=''; $('#pwErr').hidden=true; showTab(pendingTab);
+  }catch(e){
+    $('#pwErr').textContent = e.code==='locked' ? '비밀번호를 여러 번 틀려 10분 동안 잠겼습니다.' : e.code==='net' ? '서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.' : e.code==='nokey' ? 'index.html에 Supabase 공개 키가 아직 들어 있지 않습니다.' : e.code==='server' ? '서버 설정을 확인해 주세요. (공개 키 또는 SQL 설정)' : '비밀번호가 맞지 않습니다.';
+    $('#pwErr').hidden=false; $('#pw').select();
+  }finally{ b.disabled=false; }
 }
 $('#pwBtn').onclick=tryUnlock;
 $('#pw').addEventListener('keydown',e=>{ if(e.key==='Enter') tryUnlock(); });
@@ -1292,7 +1367,7 @@ loadLocal(); renderRules(); renderReasons(); renderAll();
   db = await use('db');
   if(!db){ $('#offlineNote').hidden=false; return; }
   mode='db'; students={};
-  const m=$('#mode'); m.textContent='선생님들과 실시간 공유'; m.classList.remove('local');
+  const m=$('#mode'); m.textContent=window.__sbRole==='admin'?'관리자로 접속 중':'선생님으로 접속 중'; m.classList.remove('local'); $('#logoutBtn').hidden=false;
   try{
     const u=await use('user'); userNS=u;
     if(u){
@@ -1306,7 +1381,7 @@ loadLocal(); renderRules(); renderReasons(); renderAll();
   if(!isAdmin){ $('#editRules').hidden=true; }
   if(!studentMode){
     $('#syncAll').hidden=true; $('#phoneBtn').hidden=true;
-    if(isAdmin) setTimeout(cleanupLookup,1500);
+    
     db.collection('logs').orderBy('at','desc').limit(300).onSnapshot(snap=>{
       logs=snap.docs.map(d=>d.data()); loadLogNames(); if(view==='logs') renderList();
     },()=>{});
@@ -1332,6 +1407,9 @@ loadLocal(); renderRules(); renderReasons(); renderAll();
     renderReasons();
   },()=>{});
 })();
+</script>
+<script>
+window.sbAutoLogin().then(r=>{ if(r && typeof showTab==='function' && curTab==='lock') showTab(pendingTab); });
 </script>
 </body>
 </html>
